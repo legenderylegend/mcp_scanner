@@ -81,3 +81,71 @@ description honnête, serait invisible à l'agent comme au filtre. Défendre con
 ça demanderait un autre mécanisme (audit ou exécution en bac à sable). Le projet
 traite le tool poisoning **par la description**, qui est l'attaque documentée et
 la plus répandue.
+
+---
+
+## Démo (interface)
+
+La démo montre le filtre en action, en un clic, sur les **4 serveurs piégés**
+`attacks/evil_*.py`. Elle les lance comme de **vrais serveurs MCP** et leur
+demande leurs outils via le protocole, exactement comme le ferait un agent :
+rien n'est écrit en dur, et le scanner ne connaît pas la réponse à l'avance.
+
+### Lancer
+
+```bash
+pip install -r requirements.txt
+streamlit run demo.py
+```
+
+Le juge LLM utilise **Claude Opus 4.8 sur AWS Bedrock**. Il lit les identifiants
+AWS dans un fichier `.env` à la racine du projet (ignoré par Git) :
+
+```
+AWS_DEFAULT_REGION=us-west-2
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_SESSION_TOKEN=...
+```
+
+Pour utiliser un autre modèle : `JUDGE_MODEL_ID=...` (dans `.env` ou l'environnement).
+
+Cliquez sur **« Analyser les outils »**. Pour chaque outil, la démo affiche son
+nom, son serveur, le verdict (dangereux / suspect / sain), le score du juge LLM,
+les alertes de règles et la raison.
+
+### Sans identifiants / hors-ligne
+
+Sans juge, le scanner **échoue en fermeture** (*fail closed*) : tout outil non
+vérifié est classé « dangereux » par sécurité. La page affiche alors la raison
+exacte de l'indisponibilité du juge. C'est voulu, et cela illustre la thèse du
+projet : *ces attaques sont écrites pour échapper aux règles ; c'est le juge
+LLM qui les départage.*
+
+Variante terminal (sans Streamlit) :
+
+```bash
+python demo.py --cli
+```
+
+### Pièces de la démo
+
+| Fichier | Rôle |
+|---|---|
+| `demo.py` | Interface Streamlit (+ repli terminal) qui orchestre tout. |
+| `fixtures.py` | Lance chaque serveur `attacks/evil_*.py` et récupère ses outils via MCP (`client.py`). |
+| `scanner.py` | Combine règles + juge en un verdict (dangereux / suspect / sain), fail-closed. |
+| `rules.py` | Détecteur par règles (mots-clés, chemins sensibles, balises cachées…). |
+| `judge.py` | Juge LLM (Claude Opus 4.8 via AWS Bedrock) : score 0–10 + raison. |
+
+---
+
+## Autres fichiers
+
+| Fichier | Rôle |
+|---|---|
+| `agent.py` | Agent réel (Bedrock) qui rejoue les scénarios d'attaque pour mesurer si un modèle tombe dans le piège. |
+| `compare_models.py` / `compare_models.log` | Même test sur 9 modèles (Claude 4.5 à 5, GPT-5.4 à 5.6) et le log brut des résultats. |
+| `trusted_tools.py` | Serveur MCP honnête utilisé par `agent.py` (outils de confiance à imiter ou à exploiter). |
+| `test_rules.py` / `test_judges.py` | Tests unitaires de chaque détecteur. |
+| `livrables/` | Pitch deck et defense sheet du hackathon. |

@@ -1,7 +1,13 @@
 """
-judge.py — LLM judge (OpenRouter) pour détecter les instructions cachées
+judge.py — LLM judge (AWS Bedrock) pour détecter les instructions cachées
 dans les descriptions d'outils MCP.
+
 Fonction publique : judge_tool(name, description) -> Verdict(score, reason)
+
+Config par variables d'environnement :
+  JUDGE_MODEL_ID         (optionnel) : par défaut Claude Opus 4.8 (us.anthropic.claude-opus-4-8)
+  BEDROCK_REGION         (optionnel) : sinon boto3 déduit la région
+  + les credentials AWS habituels (AWS_ACCESS_KEY_ID, etc.)
 """
 
 from __future__ import annotations
@@ -12,7 +18,28 @@ import re
 import sys
 from dataclasses import dataclass, asdict
 
-DEFAULT_MODEL = os.environ.get("JUDGE_MODEL", "openai/gpt-4o-mini")
+try:
+    from dotenv import load_dotenv
+    load_dotenv(override=True)  # charge .env à côté du projet, si présent
+except ImportError:
+    pass  # python-dotenv optionnel
+
+# Modèle du juge : Claude Opus 4.8 par défaut (même id que compare_models.py).
+# On n'utilise plus BEDROCK_MODEL_ID / ANTHROPIC_DEFAULT_SONNET_MODEL ici, pour que
+# le site reste sur Opus 4.8 même si ces variables pointent vers un autre modèle.
+# Pour changer de modèle exprès : définir JUDGE_MODEL_ID.
+JUDGE_MODEL_DEFAULT = "us.anthropic.claude-opus-4-8"
+
+def _get_model_id() -> str | None:
+    return os.environ.get("JUDGE_MODEL_ID") or JUDGE_MODEL_DEFAULT
+
+def _get_region() -> str | None:
+    return (
+        os.environ.get("BEDROCK_REGION")
+        or os.environ.get("AWS_DEFAULT_REGION")
+        or os.environ.get("AWS_REGION")
+    )
+
 
 MALICIOUS_THRESHOLD = 7
 HEALTHY_THRESHOLD = 2
@@ -73,13 +100,6 @@ class JudgeError(RuntimeError):
     pass
 
 
-def _get_api_key() -> str:
-    key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
-    if not key:
-        raise JudgeError("Clé absente : définis OPENAI_API_KEY dans le terminal.")
-    return key
-
-
 def _extract_json(text: str) -> dict:
     text = text.strip()
     try:
@@ -102,41 +122,56 @@ def _normalize(raw: dict) -> Verdict:
     return Verdict(score=score, reason=reason)
 
 
-def _call_openai(name: str, description: str, model: str) -> dict:
-    from openai import OpenAI
-    client = OpenAI(
-        api_key=_get_api_key(),
-        base_url=os.environ.get("OPENAI_BASE_URL", "https://openrouter.ai/api/v1"),
-    )
-    response = client.chat.completions.create(
-        model=model,
-        temperature=0,
-        response_format={"type": "json_object"},
+def _call_bedrock(name: str, description: str, model: str) -> dict:
+    """Appelle Bedrock Converse et renvoie le JSON du verdict."""
+    try:
+        import boto3
+    except ImportError as exc:
+        raise JudgeError("Le paquet 'boto3' est requis : pip install boto3") from exc
+
+    if not model:
+        raise JudgeError("Aucun modèle : définis JUDGE_MODEL_ID.")
+
+    client_kwargs = {}
+    region = _get_region()
+    if region:
+        client_kwargs["region_name"] = region
+    bedrock = boto3.client("bedrock-runtime", **client_kwargs)
+
+    response = bedrock.converse(
+        modelId=model,
+        system=[{"text": SYSTEM_PROMPT}],
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": USER_PROMPT_TEMPLATE.format(name=name, description=description)},
+            {"role": "user",
+             "content": [{"text": USER_PROMPT_TEMPLATE.format(name=name, description=description)}]}
         ],
+        inferenceConfig={"maxTokens": 512},  # pas de temperature : refusée par Opus 4.8
     )
-    content = response.choices[0].message.content or ""
+    content = "".join(
+        block.get("text", "") for block in response["output"]["message"]["content"]
+    )
     return _extract_json(content)
 
 
-def judge_tool(name: str, description: str, model: str = DEFAULT_MODEL, _llm_fn=None) -> Verdict:
+def judge_tool(name: str, description: str, model: str = None, _llm_fn=None) -> Verdict:
+    """Juge une description d'outil. Renvoie Verdict(score, reason)."""
     if not (description or "").strip():
         return Verdict(score=0, reason="Empty description; nothing to analyze.")
-    llm = _llm_fn or _call_openai
+
+    model = model or _get_model_id()
+    llm = _llm_fn or _call_bedrock
     try:
         raw = llm(name=name, description=description, model=model)
     except JudgeError:
         raise
     except Exception as exc:
-        raise JudgeError(f"LLM call failed: {exc}") from exc
+        raise JudgeError(f"Bedrock call failed: {exc}") from exc
     return _normalize(raw)
 
 
 def _cli(argv) -> int:
     if not argv:
-        print('Usage: python judge.py "tool description" [tool_name]')
+        print('Usage: python judge.py "tool description to analyze" [tool_name]')
         return 2
     description = argv[0]
     name = argv[1] if len(argv) > 1 else "cli_tool"

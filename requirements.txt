@@ -1,5 +1,4 @@
 mcp<2
-openai
-python-dotenv
 streamlit
-anthropic
+boto3
+python-dotenv
